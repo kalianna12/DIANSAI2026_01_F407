@@ -258,8 +258,8 @@ void Error_Handler(void)
 
   while (1)
   {
-    // Fast PA6 blink means code entered Error_Handler.
-    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_6);
+    // Fast PA7 (status LED) blink means code entered Error_Handler.
+    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_7);
 
     for (volatile uint32_t i = 0; i < 800000; i++)
     {

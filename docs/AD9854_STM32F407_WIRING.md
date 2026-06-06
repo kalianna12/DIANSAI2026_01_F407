@@ -16,31 +16,31 @@ The AD9854 module and STM32F407 must share GND.
 
 | AD9854 pin | STM32F407 pin |
 | --- | --- |
-| RESET / RST | PA6 |
-| UDCLK / UCLK | PA4 |
-| WR | PA5 |
-| RD | PA8 |
-| OSK | PA2 |
-| FDATA / FSK | PB10 |
+| RESET / RST | PA0 |
+| UDCLK / UCLK | PA1 |
+| WR | PA2 |
+| RD | PA3 |
+| OSK | PA4 |
+| FDATA / FSK | PA5 |
 
 ## Parallel Data And Address Bus
 
 | AD9854 pin | STM32F407 pin |
 | --- | --- |
-| D0 | PC0 |
-| D1 | PC1 |
-| D2 | PC2 |
-| D3 | PC3 |
-| D4 | PC4 |
-| D5 | PC5 |
-| D6 | PC6 |
-| D7 | PC7 |
-| A0 | PC8 |
-| A1 | PC9 |
-| A2 | PC10 |
-| A3 | PC11 |
-| A4 | PC12 |
-| A5 | PC13 |
+| A0 | PC0 |
+| A1 | PC1 |
+| A2 | PC2 |
+| A3 | PC3 |
+| A4 | PC4 |
+| A5 | PC5 |
+| D0 | PC6 |
+| D1 | PC7 |
+| D2 | PC8 |
+| D3 | PC9 |
+| D4 | PC10 |
+| D5 | PC11 |
+| D6 | PC12 |
+| D7 | PC13 |
 
 ## Buttons Kept
 
@@ -49,7 +49,13 @@ The AD9854 module and STM32F407 must share GND.
 | K0 | PE4 | Re-apply 35 MHz sine |
 | K1 | PE3 | Toggle output amplitude full-scale / zero |
 
+## Status LED
+
+| Signal | STM32F407 pin |
+| --- | --- |
+| STATUS_LED | PA7 (active low) |
+
 ## Output
 
-Measure the waveform on the AD9854 module sine output. PA4 is only the AD9854
+Measure the waveform on the AD9854 module sine output. PA1 is only the AD9854
 update-clock control pin, not the 35 MHz output.
