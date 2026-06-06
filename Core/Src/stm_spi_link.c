@@ -1,12 +1,15 @@
 #include "stm_spi_link.h"
+#include "stm_adc.h"
 
 #define STM_SPI_MAGIC_REQ  0xA5U
 #define STM_SPI_MAGIC_RESP 0x5AU
 #define STM_SPI_CMD_FREQ   0x01U
+#define STM_SPI_CMD_ADC    0x02U
 #define STM_SPI_FRAME_LEN  8U
 
 static uint32_t s_current_freq_hz = 35000000UL;
 static uint8_t s_sequence = 0;
+static uint8_t s_next_response_cmd = STM_SPI_CMD_FREQ;
 
 static uint8_t checksum7(const uint8_t *data)
 {
@@ -33,24 +36,45 @@ static uint32_t clamp_freq(uint32_t freq_hz)
 
 static void prepare_response(uint8_t *tx)
 {
-    uint32_t f = s_current_freq_hz;
-
     tx[0] = STM_SPI_MAGIC_RESP;
-    tx[1] = 0x00;
-    tx[2] = (uint8_t)f;
-    tx[3] = (uint8_t)(f >> 8);
-    tx[4] = (uint8_t)(f >> 16);
-    tx[5] = (uint8_t)(f >> 24);
+    tx[1] = s_next_response_cmd;
+
+    if (s_next_response_cmd == STM_SPI_CMD_ADC)
+    {
+        uint16_t adc = STM_ADC_ReadMicRaw();
+        tx[2] = (uint8_t)adc;
+        tx[3] = (uint8_t)(adc >> 8);
+        tx[4] = 0;
+        tx[5] = 0;
+    }
+    else
+    {
+        uint32_t f = s_current_freq_hz;
+        tx[2] = (uint8_t)f;
+        tx[3] = (uint8_t)(f >> 8);
+        tx[4] = (uint8_t)(f >> 16);
+        tx[5] = (uint8_t)(f >> 24);
+    }
+
     tx[6] = s_sequence;
     tx[7] = checksum7(tx);
 }
 
-static bool parse_request(const uint8_t *rx, uint32_t *out_freq_hz)
+static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz)
 {
-    if ((rx[0] != STM_SPI_MAGIC_REQ) || (rx[1] != STM_SPI_CMD_FREQ) ||
-        (rx[7] != checksum7(rx)))
+    if ((rx[0] != STM_SPI_MAGIC_REQ) || (rx[7] != checksum7(rx)))
     {
-        return false;
+        return 0;
+    }
+
+    if (rx[1] == STM_SPI_CMD_ADC)
+    {
+        return STM_SPI_CMD_ADC;
+    }
+
+    if (rx[1] != STM_SPI_CMD_FREQ)
+    {
+        return 0;
     }
 
     uint32_t freq = ((uint32_t)rx[2]) |
@@ -58,7 +82,7 @@ static bool parse_request(const uint8_t *rx, uint32_t *out_freq_hz)
                     ((uint32_t)rx[4] << 16) |
                     ((uint32_t)rx[5] << 24);
     *out_freq_hz = clamp_freq(freq);
-    return true;
+    return STM_SPI_CMD_FREQ;
 }
 
 static void spi2_clear_rx(void)
@@ -158,12 +182,19 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
     }
 
     uint32_t freq_hz = 0;
-    if (!parse_request(rx, &freq_hz))
+    uint8_t cmd = parse_request(rx, &freq_hz);
+    if (cmd == 0)
     {
         return false;
     }
 
     s_sequence++;
+    s_next_response_cmd = cmd;
+    if (cmd == STM_SPI_CMD_ADC)
+    {
+        return false;
+    }
+
     s_current_freq_hz = freq_hz;
     if (out_freq_hz != NULL)
     {

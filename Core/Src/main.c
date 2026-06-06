@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "ad9854.h"
+#include "stm_adc.h"
 #include "stm_spi_link.h"
 #include <stdint.h>
 /* USER CODE END Includes */
@@ -186,6 +187,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   startup_blink();
+  STM_ADC_Init();
   AD9854_IO_Init();
   HAL_Delay(500);
   AD9854_InitSingle();
