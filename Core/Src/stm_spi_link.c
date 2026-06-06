@@ -5,11 +5,19 @@
 #define STM_SPI_MAGIC_RESP 0x5AU
 #define STM_SPI_CMD_FREQ   0x01U
 #define STM_SPI_CMD_ADC    0x02U
+#define STM_SPI_CMD_RATE   0x03U
+#define STM_SPI_CMD_WAVE   0x04U
 #define STM_SPI_FRAME_LEN  8U
+#define STM_SPI_WAVE_MAX_POINTS 512U
+#define STM_SPI_WAVE_FRAME_LEN  (8U + (STM_SPI_WAVE_MAX_POINTS * 2U))
 
 static uint32_t s_current_freq_hz = 35000000UL;
 static uint8_t s_sequence = 0;
 static uint8_t s_next_response_cmd = STM_SPI_CMD_FREQ;
+static uint16_t s_wave_points = 256U;
+static uint8_t s_tx_frame[STM_SPI_WAVE_FRAME_LEN];
+static uint8_t s_rx_frame[STM_SPI_WAVE_FRAME_LEN];
+static uint16_t s_wave_temp[STM_SPI_WAVE_MAX_POINTS];
 
 static uint8_t checksum7(const uint8_t *data)
 {
@@ -34,8 +42,26 @@ static uint32_t clamp_freq(uint32_t freq_hz)
     return freq_hz;
 }
 
-static void prepare_response(uint8_t *tx)
+static uint8_t checksum_bytes(const uint8_t *data, uint16_t len, int skip_index)
 {
+    uint8_t sum = 0;
+    for (uint16_t i = 0; i < len; i++)
+    {
+        if ((int)i != skip_index)
+        {
+            sum = (uint8_t)(sum + data[i]);
+        }
+    }
+    return sum;
+}
+
+static uint16_t prepare_response(uint8_t *tx)
+{
+    for (uint16_t i = 0; i < STM_SPI_WAVE_FRAME_LEN; i++)
+    {
+        tx[i] = 0;
+    }
+
     tx[0] = STM_SPI_MAGIC_RESP;
     tx[1] = s_next_response_cmd;
 
@@ -46,6 +72,35 @@ static void prepare_response(uint8_t *tx)
         tx[3] = (uint8_t)(adc >> 8);
         tx[4] = 0;
         tx[5] = 0;
+    }
+    else if (s_next_response_cmd == STM_SPI_CMD_RATE)
+    {
+        uint32_t rate = STM_ADC_GetSampleRate();
+        tx[2] = (uint8_t)rate;
+        tx[3] = (uint8_t)(rate >> 8);
+        tx[4] = (uint8_t)(rate >> 16);
+        tx[5] = (uint8_t)(rate >> 24);
+    }
+    else if (s_next_response_cmd == STM_SPI_CMD_WAVE)
+    {
+        uint16_t copied = STM_ADC_CopyLatest(s_wave_temp, s_wave_points);
+        uint32_t rate = STM_ADC_GetSampleRate();
+
+        tx[2] = (uint8_t)copied;
+        tx[3] = (uint8_t)(copied >> 8);
+        tx[4] = (rate == STM_ADC_RATE_44K_HZ) ? 1U : 0U;
+        tx[5] = 0;
+        tx[6] = s_sequence;
+        tx[7] = 0;
+
+        for (uint16_t i = 0; i < copied; i++)
+        {
+            tx[8U + (i * 2U)] = (uint8_t)s_wave_temp[i];
+            tx[9U + (i * 2U)] = (uint8_t)(s_wave_temp[i] >> 8);
+        }
+        uint16_t len = (uint16_t)(8U + (copied * 2U));
+        tx[7] = checksum_bytes(tx, len, 7);
+        return len;
     }
     else
     {
@@ -58,9 +113,11 @@ static void prepare_response(uint8_t *tx)
 
     tx[6] = s_sequence;
     tx[7] = checksum7(tx);
+    return STM_SPI_FRAME_LEN;
 }
 
-static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz)
+static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t *out_rate_hz,
+                             uint16_t *out_wave_points)
 {
     if ((rx[0] != STM_SPI_MAGIC_REQ) || (rx[7] != checksum7(rx)))
     {
@@ -70,6 +127,30 @@ static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz)
     if (rx[1] == STM_SPI_CMD_ADC)
     {
         return STM_SPI_CMD_ADC;
+    }
+
+    if (rx[1] == STM_SPI_CMD_RATE)
+    {
+        *out_rate_hz = ((uint32_t)rx[2]) |
+                       ((uint32_t)rx[3] << 8) |
+                       ((uint32_t)rx[4] << 16) |
+                       ((uint32_t)rx[5] << 24);
+        return STM_SPI_CMD_RATE;
+    }
+
+    if (rx[1] == STM_SPI_CMD_WAVE)
+    {
+        uint16_t points = (uint16_t)rx[2] | ((uint16_t)rx[3] << 8);
+        if (points == 0U)
+        {
+            points = 256U;
+        }
+        if (points > STM_SPI_WAVE_MAX_POINTS)
+        {
+            points = STM_SPI_WAVE_MAX_POINTS;
+        }
+        *out_wave_points = points;
+        return STM_SPI_CMD_WAVE;
     }
 
     if (rx[1] != STM_SPI_CMD_FREQ)
@@ -106,7 +187,7 @@ static bool wait_nss_low(void)
     return false;
 }
 
-static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx)
+static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx, uint16_t len)
 {
     spi2_clear_rx();
 
@@ -115,7 +196,7 @@ static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx)
         return false;
     }
 
-    for (int i = 0; i < STM_SPI_FRAME_LEN; i++)
+    for (uint16_t i = 0; i < len; i++)
     {
         uint32_t guard = 250000U;
         while (((SPI2->SR & SPI_SR_TXE) == 0U) && (--guard > 0U))
@@ -171,18 +252,23 @@ void STM_SPI_Link_Init(uint32_t initial_freq_hz)
 
 bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
 {
-    uint8_t tx[STM_SPI_FRAME_LEN] = {0};
-    uint8_t rx[STM_SPI_FRAME_LEN] = {0};
+    uint16_t len = prepare_response(s_tx_frame);
 
-    prepare_response(tx);
-
-    if (!spi2_transfer_frame(tx, rx))
+    if (!spi2_transfer_frame(s_tx_frame, s_rx_frame, len))
     {
         return false;
     }
 
+    if (s_next_response_cmd == STM_SPI_CMD_WAVE)
+    {
+        s_next_response_cmd = STM_SPI_CMD_FREQ;
+        return false;
+    }
+
     uint32_t freq_hz = 0;
-    uint8_t cmd = parse_request(rx, &freq_hz);
+    uint32_t rate_hz = 0;
+    uint16_t wave_points = 0;
+    uint8_t cmd = parse_request(s_rx_frame, &freq_hz, &rate_hz, &wave_points);
     if (cmd == 0)
     {
         return false;
@@ -192,6 +278,16 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
     s_next_response_cmd = cmd;
     if (cmd == STM_SPI_CMD_ADC)
     {
+        return false;
+    }
+    if (cmd == STM_SPI_CMD_RATE)
+    {
+        STM_ADC_SetSampleRate(rate_hz);
+        return false;
+    }
+    if (cmd == STM_SPI_CMD_WAVE)
+    {
+        s_wave_points = wave_points;
         return false;
     }
 
