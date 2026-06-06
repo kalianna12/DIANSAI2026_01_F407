@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "ad9854.h"
+#include "stm_spi_link.h"
 #include <stdint.h>
 /* USER CODE END Includes */
 
@@ -47,7 +48,7 @@
 
 static uint8_t last_k0 = 1;
 static uint8_t last_k1 = 1;
-static uint8_t output_enabled = 1;
+static uint32_t current_freq_hz = AD9854_DEFAULT_FREQ_HZ;
 
 /* USER CODE END PV */
 
@@ -70,6 +71,19 @@ static void status_led_off(void)
     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
 }
 
+static uint32_t clamp_freq(uint32_t freq_hz)
+{
+    if (freq_hz < STM_SPI_FREQ_MIN_HZ)
+    {
+        return STM_SPI_FREQ_MIN_HZ;
+    }
+    if (freq_hz > STM_SPI_FREQ_MAX_HZ)
+    {
+        return STM_SPI_FREQ_MAX_HZ;
+    }
+    return freq_hz;
+}
+
 static void startup_blink(void)
 {
     for (int i = 0; i < 3; i++)
@@ -83,8 +97,17 @@ static void startup_blink(void)
 
 static void ad9854_start_default(void)
 {
-    AD9854_SetSine(AD9854_DEFAULT_FREQ_HZ, AD9854_FULL_SCALE_AMP);
-    output_enabled = 1;
+    current_freq_hz = AD9854_DEFAULT_FREQ_HZ;
+    AD9854_SetSine(current_freq_hz, AD9854_FULL_SCALE_AMP);
+    STM_SPI_Link_SetCurrentFreq(current_freq_hz);
+    status_led_on();
+}
+
+static void ad9854_apply_frequency(uint32_t freq_hz)
+{
+    current_freq_hz = clamp_freq(freq_hz);
+    AD9854_SetSine(current_freq_hz, AD9854_FULL_SCALE_AMP);
+    STM_SPI_Link_SetCurrentFreq(current_freq_hz);
     status_led_on();
 }
 
@@ -92,10 +115,7 @@ static void key_feedback_blink(void)
 {
     status_led_off();
     HAL_Delay(80);
-    if (output_enabled)
-    {
-        status_led_on();
-    }
+    status_led_on();
 }
 
 static void scan_keys(void)
@@ -103,35 +123,26 @@ static void scan_keys(void)
     uint8_t k0 = HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_4);  // K0, pressed = 0
     uint8_t k1 = HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_3);  // K1, pressed = 0
 
-    // K0: re-apply the default 35 MHz sine configuration.
+    // K0: -1 MHz local test, amplitude remains full scale.
     if (last_k0 == 1 && k0 == 0)
     {
         HAL_Delay(20);
 
         if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_4) == GPIO_PIN_RESET)
         {
-            ad9854_start_default();
+            ad9854_apply_frequency(current_freq_hz - 1000000UL);
             key_feedback_blink();
         }
     }
 
-    // K1: toggle output amplitude between full scale and zero.
+    // K1: +1 MHz local test, amplitude remains full scale.
     if (last_k1 == 1 && k1 == 0)
     {
         HAL_Delay(20);
 
         if (HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_3) == GPIO_PIN_RESET)
         {
-            if (output_enabled)
-            {
-                AD9854_Stop();
-                output_enabled = 0;
-                status_led_off();
-            }
-            else
-            {
-                ad9854_start_default();
-            }
+            ad9854_apply_frequency(current_freq_hz + 1000000UL);
             key_feedback_blink();
         }
     }
@@ -179,6 +190,7 @@ int main(void)
   HAL_Delay(500);
   AD9854_InitSingle();
   ad9854_start_default();
+  STM_SPI_Link_Init(current_freq_hz);
 
   /* USER CODE END 2 */
 
@@ -190,8 +202,13 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
+    uint32_t spi_freq_hz = 0;
+    if (STM_SPI_Link_Poll(&spi_freq_hz))
+    {
+        ad9854_apply_frequency(spi_freq_hz);
+        key_feedback_blink();
+    }
     scan_keys();
-    HAL_Delay(10);
 
     /* USER CODE END 3 */
   }
