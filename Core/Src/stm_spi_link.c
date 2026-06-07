@@ -25,8 +25,6 @@ static uint8_t s_tx_frame[STM_SPI_WAVE_FRAME_LEN];
 static uint8_t s_rx_frame[STM_SPI_WAVE_FRAME_LEN];
 static uint16_t s_wave_temp[STM_SPI_WAVE_MAX_POINTS];
 
-/* AFSK state */
-static bool s_afsk_expect_data = false;
 static uint8_t s_afsk_addr = 0;
 static uint8_t s_afsk_len = 0;
 static uint8_t s_afsk_buf[STM_SPI_AFSK_MAX_LEN];
@@ -151,10 +149,19 @@ static uint16_t prepare_response(uint8_t *tx)
     return STM_SPI_FRAME_LEN;
 }
 
-static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t *out_rate_hz,
-                             uint16_t *out_wave_points)
+static uint8_t parse_request(const uint8_t *rx, uint16_t rx_len, uint32_t *out_freq_hz,
+                             uint32_t *out_rate_hz, uint16_t *out_wave_points)
 {
-    if ((rx[0] != STM_SPI_MAGIC_REQ) || (rx[7] != checksum7(rx)))
+    if (rx_len < STM_SPI_FRAME_LEN)
+    {
+        return 0;
+    }
+
+    if (rx[0] != STM_SPI_MAGIC_REQ)
+    {
+        return 0;
+    }
+    if ((rx[1] != STM_SPI_CMD_AFSK_SEND) && (rx[7] != checksum7(rx)))
     {
         return 0;
     }
@@ -214,10 +221,20 @@ static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t 
         s_afsk_len = rx[3];
         if (s_afsk_len == 0 || s_afsk_len > STM_SPI_AFSK_MAX_LEN)
         {
-            s_afsk_expect_data = false;
             return 0;
         }
-        s_afsk_expect_data = true;
+        if (rx_len < (uint16_t)(STM_SPI_FRAME_LEN + s_afsk_len))
+        {
+            return 0;
+        }
+        if (rx[7] != checksum_bytes(rx, (uint16_t)(STM_SPI_FRAME_LEN + s_afsk_len), 7))
+        {
+            return 0;
+        }
+        for (uint8_t i = 0; i < s_afsk_len; i++)
+        {
+            s_afsk_buf[i] = rx[STM_SPI_FRAME_LEN + i];
+        }
         return STM_SPI_CMD_AFSK_SEND;
     }
 
@@ -255,7 +272,7 @@ static bool wait_nss_low(void)
     return false;
 }
 
-static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx, uint16_t len)
+static bool spi2_transfer_request(const uint8_t *tx, uint8_t *rx, uint16_t *out_len)
 {
     spi2_clear_rx();
 
@@ -264,7 +281,7 @@ static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx, uint16_t len)
         return false;
     }
 
-    for (uint16_t i = 0; i < len; i++)
+    for (uint16_t i = 0; i < STM_SPI_FRAME_LEN; i++)
     {
         uint32_t guard = 250000U;
         while (((SPI2->SR & SPI_SR_TXE) == 0U) && (--guard > 0U))
@@ -289,6 +306,44 @@ static bool spi2_transfer_frame(const uint8_t *tx, uint8_t *rx, uint16_t len)
         rx[i] = *(__IO uint8_t *)&SPI2->DR;
     }
 
+    uint16_t total_len = STM_SPI_FRAME_LEN;
+    if (rx[0] == STM_SPI_MAGIC_REQ && rx[1] == STM_SPI_CMD_AFSK_SEND)
+    {
+        uint8_t payload_len = rx[3];
+        if (payload_len > 0U && payload_len <= STM_SPI_AFSK_MAX_LEN)
+        {
+            total_len = (uint16_t)(STM_SPI_FRAME_LEN + payload_len);
+            for (uint16_t i = STM_SPI_FRAME_LEN; i < total_len; i++)
+            {
+                uint32_t guard = 250000U;
+                while (((SPI2->SR & SPI_SR_TXE) == 0U) && (--guard > 0U))
+                {
+                }
+                if (guard == 0U)
+                {
+                    return false;
+                }
+
+                *(__IO uint8_t *)&SPI2->DR = 0;
+
+                guard = 250000U;
+                while (((SPI2->SR & SPI_SR_RXNE) == 0U) && (--guard > 0U))
+                {
+                }
+                if (guard == 0U)
+                {
+                    return false;
+                }
+
+                rx[i] = *(__IO uint8_t *)&SPI2->DR;
+            }
+        }
+    }
+
+    if (out_len != NULL)
+    {
+        *out_len = total_len;
+    }
     return true;
 }
 
@@ -320,39 +375,10 @@ void STM_SPI_Link_Init(uint32_t initial_freq_hz)
 
 bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
 {
-    /* AFSK data phase: ESP32 is sending extended frame with SMS data.
-     * We already received the header (addr, len) in previous poll.
-     * Now receive the full 8+len byte frame to get the data. */
-    if (s_afsk_expect_data)
-    {
-        s_afsk_expect_data = false;
+    prepare_response(s_tx_frame);
+    uint16_t rx_len = 0;
 
-        uint16_t ext_len = (uint16_t)(STM_SPI_FRAME_LEN + s_afsk_len);
-        prepare_response(s_tx_frame); /* fills first 8 bytes of s_tx_frame */
-
-        if (!spi2_transfer_frame(s_tx_frame, s_rx_frame, ext_len))
-        {
-            s_next_response_cmd = STM_SPI_CMD_FREQ;
-            return false;
-        }
-
-        /* Copy data from offset 8 */
-        for (uint8_t i = 0; i < s_afsk_len; i++)
-        {
-            s_afsk_buf[i] = s_rx_frame[STM_SPI_FRAME_LEN + i];
-        }
-
-        s_sequence++;
-        s_next_response_cmd = STM_SPI_CMD_AFSK_SEND;
-
-        /* Start AFSK transmission on AD9102 */
-        AD9102_StartAfsk(s_afsk_addr, s_afsk_buf, s_afsk_len);
-        return false;
-    }
-
-    uint16_t len = prepare_response(s_tx_frame);
-
-    if (!spi2_transfer_frame(s_tx_frame, s_rx_frame, len))
+    if (!spi2_transfer_request(s_tx_frame, s_rx_frame, &rx_len))
     {
         return false;
     }
@@ -366,7 +392,7 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
     uint32_t freq_hz = 0;
     uint32_t rate_hz = 0;
     uint16_t wave_points = 0;
-    uint8_t cmd = parse_request(s_rx_frame, &freq_hz, &rate_hz, &wave_points);
+    uint8_t cmd = parse_request(s_rx_frame, rx_len, &freq_hz, &rate_hz, &wave_points);
     if (cmd == 0)
     {
         return false;
@@ -397,6 +423,11 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
     if (cmd == STM_SPI_CMD_AD9102_AMP)
     {
         (void)AD9102_SetAmplitude((uint16_t)rate_hz);
+        return false;
+    }
+    if (cmd == STM_SPI_CMD_AFSK_SEND)
+    {
+        (void)AD9102_StartAfsk(s_afsk_addr, s_afsk_buf, s_afsk_len);
         return false;
     }
 
