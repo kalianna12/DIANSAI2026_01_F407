@@ -20,7 +20,6 @@
 #define AD9102_PIN_CS_N       GPIO_PIN_5
 
 #define AD9102_DAC_CLK_HZ     100000000UL
-#define AD9102_DEFAULT_GAIN   0x0400U
 
 #define REG_SPICONFIG       0x0000
 #define REG_DACDOF          0x0025
@@ -50,6 +49,7 @@
 
 static ad9102_wave_t s_wave = AD9102_WAVE_SINE;
 static uint32_t s_freq_hz = AD9102_DEFAULT_FREQ_HZ;
+static uint16_t s_amplitude = AD9102_DEFAULT_AMP;
 
 static const uint16_t s_square[2] = {
     0x000, 0x0FFF,
@@ -267,16 +267,21 @@ bool AD9102_Init(void)
     HAL_Delay(10U);
 
     (void)read_reg(REG_SPICONFIG, &dummy);
-    return AD9102_Configure(AD9102_WAVE_SINE, AD9102_DEFAULT_FREQ_HZ);
+    return AD9102_Configure(AD9102_WAVE_SINE, AD9102_DEFAULT_FREQ_HZ, AD9102_DEFAULT_AMP);
 }
 
-bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz)
+bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
 {
     bool ok = true;
 
+    if (amplitude > 0x07FFU)
+    {
+        amplitude = 0x07FFU;
+    }
+
     ok = ok && write_reg(REG_PAT_STATUS, 0x0000);
     ok = ok && write_reg(REG_DACDOF, 0x0000);
-    ok = ok && write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(AD9102_DEFAULT_GAIN));
+    ok = ok && write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(amplitude));
     ok = ok && write_dds_frequency(freq_hz);
 
     switch (wave)
@@ -311,13 +316,37 @@ bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz)
     {
         s_wave = wave;
         s_freq_hz = freq_hz;
+        s_amplitude = amplitude;
     }
     return ok;
 }
 
 bool AD9102_SetMode(ad9102_wave_t wave)
 {
-    return AD9102_Configure(wave, s_freq_hz);
+    return AD9102_Configure(wave, s_freq_hz, s_amplitude);
+}
+
+bool AD9102_SetFrequency(uint32_t freq_hz)
+{
+    return AD9102_Configure(s_wave, freq_hz, s_amplitude);
+}
+
+bool AD9102_SetAmplitude(uint16_t amplitude)
+{
+    if (amplitude > 0x07FFU)
+    {
+        amplitude = 0x07FFU;
+    }
+    if (!write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(amplitude)))
+    {
+        return false;
+    }
+    if (!ram_update())
+    {
+        return false;
+    }
+    s_amplitude = amplitude;
+    return true;
 }
 
 ad9102_wave_t AD9102_GetMode(void)
@@ -328,4 +357,9 @@ ad9102_wave_t AD9102_GetMode(void)
 uint32_t AD9102_GetFreqHz(void)
 {
     return s_freq_hz;
+}
+
+uint16_t AD9102_GetAmplitude(void)
+{
+    return s_amplitude;
 }
