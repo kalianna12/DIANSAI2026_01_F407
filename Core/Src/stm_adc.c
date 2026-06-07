@@ -1,7 +1,9 @@
 #include "stm_adc.h"
+#include <stdbool.h>
 
 static volatile uint16_t s_adc_dma_buf[STM_ADC_DMA_BUF_LEN];
 static uint32_t s_sample_rate_hz = STM_ADC_RATE_16K_HZ;
+static bool s_adc_enabled = false;
 
 static uint32_t clamp_rate(uint32_t sample_rate_hz)
 {
@@ -75,12 +77,17 @@ void STM_ADC_Init(void)
     }
 
     DMA2_Stream0->CR |= DMA_SxCR_EN;
+    s_adc_enabled = true;
     STM_ADC_SetSampleRate(STM_ADC_RATE_16K_HZ);
 }
 
 void STM_ADC_SetSampleRate(uint32_t sample_rate_hz)
 {
     s_sample_rate_hz = clamp_rate(sample_rate_hz);
+    if (!s_adc_enabled)
+    {
+        return;
+    }
     tim3_set_rate(s_sample_rate_hz);
 }
 
@@ -91,6 +98,11 @@ uint32_t STM_ADC_GetSampleRate(void)
 
 uint16_t STM_ADC_ReadMicRaw(void)
 {
+    if (!s_adc_enabled)
+    {
+        return 0;
+    }
+
     uint32_t write = STM_ADC_DMA_BUF_LEN - DMA2_Stream0->NDTR;
     if (write >= STM_ADC_DMA_BUF_LEN)
     {
@@ -104,6 +116,10 @@ uint16_t STM_ADC_ReadMicRaw(void)
 uint16_t STM_ADC_CopyLatest(uint16_t *out, uint16_t max_points)
 {
     if ((out == 0) || (max_points == 0U))
+    {
+        return 0;
+    }
+    if (!s_adc_enabled)
     {
         return 0;
     }

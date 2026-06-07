@@ -188,7 +188,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   startup_blink();
-  STM_ADC_Init();
+  /* On-board MIC ADC/DMA/TIM3 disabled; external modules drive the call path. */
   AD9854_IO_Init();
   AD9102_IO_Init();
   HAL_Delay(500);

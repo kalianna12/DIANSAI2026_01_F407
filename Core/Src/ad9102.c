@@ -451,6 +451,28 @@ static uint8_t  s_afsk_tx_buf[80];
 static uint16_t s_afsk_bit_count;
 static uint16_t s_afsk_bit_idx;
 
+static void stop_afsk_timer(void)
+{
+    __HAL_RCC_TIM2_CLK_ENABLE();
+    TIM2->DIER = 0;
+    TIM2->CR1 = 0;
+    TIM2->SR = 0;
+    NVIC_DisableIRQ(TIM2_IRQn);
+    NVIC_ClearPendingIRQ(TIM2_IRQn);
+}
+
+static void restore_afsk_idle_output(void)
+{
+    write_reg(REG_PAT_STATUS, 0x0000);
+    write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(s_amplitude));
+    write_dds_frequency(AFSK_SPACE_HZ);
+    write_reg(REG_DDS_CONFIG, 0x0000);
+    write_reg(REG_TW_RAM_CONFIG, 0x0000);
+    write_reg(REG_WAV_CONFIG, WAV_CONFIG_DDS_CONTINUOUS);
+    write_reg(REG_PAT_STATUS, 0x0001);
+    ram_update();
+}
+
 static uint8_t crc8_afsk(const uint8_t *data, uint8_t len)
 {
     uint8_t crc = 0;
@@ -502,9 +524,11 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
         return false;
     }
     s_afsk_busy = true;
+    stop_afsk_timer();
 
     /* Ensure AD9102 is in DDS sine continuous mode, not SRAM */
     write_reg(REG_PAT_STATUS, 0x0000);   /* stop pattern */
+    write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(s_amplitude));
     write_reg(REG_DDS_CONFIG, 0x0000);
     write_reg(REG_TW_RAM_CONFIG, 0x0000);
     write_reg(REG_WAV_CONFIG, WAV_CONFIG_DDS_CONTINUOUS);
@@ -536,7 +560,7 @@ void TIM2_IRQHandler(void)
     if ((TIM2->SR & TIM_SR_UIF) == 0U) {
         return;
     }
-    TIM2->SR = ~TIM_SR_UIF;
+    TIM2->SR &= ~TIM_SR_UIF;
 
     if (s_afsk_bit_idx < s_afsk_bit_count) {
         uint16_t byte_idx = s_afsk_bit_idx >> 3;
@@ -549,9 +573,9 @@ void TIM2_IRQHandler(void)
 
         s_afsk_bit_idx++;
     } else {
-        /* All bits sent — stop timer */
-        TIM2->DIER = 0;
-        TIM2->CR1 = 0;
+        /* All bits sent: stop timer and leave AD9102 in a known output state. */
+        stop_afsk_timer();
+        restore_afsk_idle_output();
         s_afsk_busy = false;
     }
 }
