@@ -45,7 +45,9 @@
 #define WAV_CONFIG_DDS_CONTINUOUS (WAV_CONFIG_PRESTORE_DDS | WAV_CONFIG_WAVE_PRESTORE)
 #define WAV_CONFIG_WAVE_RAM       0U
 #define DAC_12BIT_FIELD(v)        ((uint16_t)(((uint16_t)(v) & 0x0FFFU) << 4))
-#define ADDR_12BIT_FIELD(v)       ((uint16_t)(((uint16_t)(v) & 0x0FFFU) << 5))
+#define ADDR_12BIT_FIELD(v)       ((uint16_t)(((uint16_t)(v) & 0x0FFFU) << 4))
+#define SRAM_TEST_POINTS          1024U
+#define SRAM_TEST_PERIOD          (SRAM_TEST_POINTS - 1U)
 
 static ad9102_wave_t s_wave = AD9102_WAVE_SINE;
 static uint32_t s_freq_hz = AD9102_DEFAULT_FREQ_HZ;
@@ -159,6 +161,18 @@ static bool ram_update(void)
     return write_reg(REG_RAMUPDATE, 0x0001);
 }
 
+static void stop_pattern(void)
+{
+    pin_set(AD9102_PIN_TRIGGER, GPIO_PIN_SET);
+    delay_cycles(120U);
+}
+
+static void start_pattern(void)
+{
+    pin_set(AD9102_PIN_TRIGGER, GPIO_PIN_RESET);
+    delay_cycles(120U);
+}
+
 static bool write_dds_frequency(uint32_t freq_hz)
 {
     if (freq_hz == 0U)
@@ -210,7 +224,8 @@ static bool write_sram_waveform(const int16_t *samples)
     }
     for (uint16_t i = 0; i < 4096U; i++)
     {
-        if (!write_reg((uint16_t)(REG_SRAM_DATA + i), (uint16_t)(samples[i] << 2)))
+        int32_t shifted = ((int32_t)samples[i]) << 2;
+        if (!write_reg((uint16_t)(REG_SRAM_DATA + i), (uint16_t)shifted))
         {
             return false;
         }
@@ -225,20 +240,22 @@ static void build_sram_wave(ad9102_wave_t wave)
         switch (wave)
         {
         case AD9102_WAVE_SQUARE:
-            s_sram_wave[i] = (i < 2048U) ? -2048 : 2047;
+            s_sram_wave[i] = ((i % SRAM_TEST_POINTS) < (SRAM_TEST_POINTS / 2U)) ? -512 : 511;
             break;
         case AD9102_WAVE_TRIANGLE:
-            if (i < 2048U)
+            if ((i % SRAM_TEST_POINTS) < (SRAM_TEST_POINTS / 2U))
             {
-                s_sram_wave[i] = (int16_t)((int32_t)-2048 + ((int32_t)i * 4095) / 2047);
+                uint16_t phase = i % SRAM_TEST_POINTS;
+                s_sram_wave[i] = (int16_t)((int32_t)-1024 + ((int32_t)phase * 2047) / ((SRAM_TEST_POINTS / 2U) - 1U));
             }
             else
             {
-                s_sram_wave[i] = (int16_t)((int32_t)2047 - (((int32_t)i - 2048) * 4095) / 2047);
+                uint16_t phase = (i % SRAM_TEST_POINTS) - (SRAM_TEST_POINTS / 2U);
+                s_sram_wave[i] = (int16_t)((int32_t)1023 - ((int32_t)phase * 2047) / ((SRAM_TEST_POINTS / 2U) - 1U));
             }
             break;
         case AD9102_WAVE_ARBITRARY:
-            s_sram_wave[i] = (int16_t)((int32_t)-2048 + ((int32_t)i * 4095) / 4095);
+            s_sram_wave[i] = (int16_t)((int32_t)-1024 + ((int32_t)(i % SRAM_TEST_POINTS) * 2047) / SRAM_TEST_PERIOD);
             break;
         default:
             s_sram_wave[i] = 0;
@@ -249,12 +266,40 @@ static void build_sram_wave(ad9102_wave_t wave)
 
 static bool configure_sram_waveform(ad9102_wave_t wave, uint32_t *actual_freq_hz)
 {
+    bool ok = true;
+
+    stop_pattern();
+    ok = ok && write_reg(REG_PAT_STATUS, 0x0000);
+    ok = ok && write_reg(REG_WAV_CONFIG, 0x0000);
+    ok = ok && write_reg(REG_DDS_CONFIG, 0x0000);
+    ok = ok && write_reg(REG_TW_RAM_CONFIG, 0x0000);
+    ok = ok && write_reg(REG_PAT_TYPE, 0x0000);
+    ok = ok && write_reg(REG_PAT_TIMEBASE, 0x0000);
+    ok = ok && write_reg(REG_PAT_PERIOD, 0x0000);
+    ok = ok && write_reg(REG_START_DLY, 0x0000);
+    ok = ok && write_reg(REG_START_ADDR, 0x0000);
+    ok = ok && write_reg(REG_STOP_ADDR, 0x0000);
+    ok = ok && ram_update();
+
     build_sram_wave(wave);
     if (actual_freq_hz != NULL)
     {
-        *actual_freq_hz = AD9102_DAC_CLK_HZ / 4096U;
+        *actual_freq_hz = AD9102_DAC_CLK_HZ / SRAM_TEST_POINTS;
     }
-    return write_sram_waveform(s_sram_wave) && write_official_regs(s_ad9102_sram_regval);
+
+    ok = ok && write_sram_waveform(s_sram_wave);
+    ok = ok && write_official_regs(s_ad9102_sram_regval);
+    ok = ok && write_reg(REG_PAT_PERIOD, SRAM_TEST_PERIOD);
+    ok = ok && write_reg(REG_START_DLY, 0x0000);
+    ok = ok && write_reg(REG_START_ADDR, ADDR_12BIT_FIELD(0U));
+    ok = ok && write_reg(REG_STOP_ADDR, ADDR_12BIT_FIELD(SRAM_TEST_PERIOD));
+    ok = ok && write_reg(REG_DDS_CONFIG, 0x0000);
+    ok = ok && write_reg(REG_TW_RAM_CONFIG, 0x0000);
+    ok = ok && write_reg(REG_WAV_CONFIG, WAV_CONFIG_WAVE_RAM);
+    ok = ok && write_reg(REG_PAT_STATUS, 0x0001);
+    ok = ok && ram_update();
+    start_pattern();
+    return ok;
 }
 
 void AD9102_IO_Init(void)
@@ -279,8 +324,8 @@ void AD9102_IO_Init(void)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(AD9102_GPIO_PORT, &GPIO_InitStruct);
 
-    pin_set(AD9102_PIN_CS_N | AD9102_PIN_RESET_N, GPIO_PIN_SET);
-    pin_set(AD9102_PIN_TRIGGER | AD9102_PIN_SCLK, GPIO_PIN_RESET);
+    pin_set(AD9102_PIN_CS_N | AD9102_PIN_RESET_N | AD9102_PIN_TRIGGER, GPIO_PIN_SET);
+    pin_set(AD9102_PIN_SCLK, GPIO_PIN_RESET);
 }
 
 bool AD9102_Init(void)
@@ -306,6 +351,7 @@ bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
         amplitude = 0x07FFU;
     }
 
+    stop_pattern();
     ok = ok && write_reg(REG_PAT_STATUS, 0x0000);
     ok = ok && write_reg(REG_DACDOF, 0x0000);
     ok = ok && write_reg(REG_DAC_DGAIN, DAC_12BIT_FIELD(amplitude));
@@ -332,13 +378,12 @@ bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
         return false;
     }
 
-    ok = ok && write_reg(REG_PAT_STATUS, 0x0001);
-    ok = ok && ram_update();
-
-    pin_set(AD9102_PIN_TRIGGER, GPIO_PIN_SET);
-    delay_cycles(120U);
-    pin_set(AD9102_PIN_TRIGGER, GPIO_PIN_RESET);
-    delay_cycles(120U);
+    if (wave == AD9102_WAVE_SINE)
+    {
+        ok = ok && write_reg(REG_PAT_STATUS, 0x0001);
+        ok = ok && ram_update();
+        start_pattern();
+    }
 
     if (ok)
     {
