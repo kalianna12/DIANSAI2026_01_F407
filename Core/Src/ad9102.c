@@ -446,6 +446,7 @@ uint16_t AD9102_GetAmplitude(void)
 #define AFSK_BIT_MS    (1000U / AFSK_BPS)  /* 10 ms */
 
 /* We use TIM2 for AFSK bit clock. ISR lives here. */
+static volatile bool s_afsk_busy = false;
 static uint8_t  s_afsk_tx_buf[80];
 static uint16_t s_afsk_bit_count;
 static uint16_t s_afsk_bit_idx;
@@ -466,26 +467,29 @@ static uint8_t crc8_afsk(const uint8_t *data, uint8_t len)
     return crc;
 }
 
+/* AFSK byte order: LSB first per byte */
 static void build_afsk_frame(uint8_t addr, const uint8_t *data, uint8_t len)
 {
-    /* Preamble: 0xAA, 0xAA  (16 bits alternating) */
+    /* Preamble: 4 x 0xAA = 32 bits alternating 0101..., ~320ms @100bps */
     s_afsk_tx_buf[0] = 0xAA;
     s_afsk_tx_buf[1] = 0xAA;
+    s_afsk_tx_buf[2] = 0xAA;
+    s_afsk_tx_buf[3] = 0xAA;
     /* Start flag: 0x7E */
-    s_afsk_tx_buf[2] = 0x7E;
+    s_afsk_tx_buf[4] = 0x7E;
     /* Address */
-    s_afsk_tx_buf[3] = addr;
+    s_afsk_tx_buf[5] = addr;
     /* Length */
-    s_afsk_tx_buf[4] = len;
+    s_afsk_tx_buf[6] = len;
     /* Data */
     for (uint8_t i = 0; i < len; i++) {
-        s_afsk_tx_buf[5 + i] = data[i];
+        s_afsk_tx_buf[7 + i] = data[i];
     }
     /* CRC-8 over addr + len + data */
-    uint8_t crc = crc8_afsk(&s_afsk_tx_buf[3], (uint8_t)(2 + len));
-    s_afsk_tx_buf[5 + len] = crc;
+    uint8_t crc = crc8_afsk(&s_afsk_tx_buf[5], (uint8_t)(2 + len));
+    s_afsk_tx_buf[7 + len] = crc;
 
-    s_afsk_bit_count = (uint16_t)((6U + len) * 8U);
+    s_afsk_bit_count = (uint16_t)((8U + len) * 8U);
     s_afsk_bit_idx = 0;
 }
 
@@ -494,6 +498,11 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
     if (len == 0 || data == NULL) {
         return false;
     }
+    if (s_afsk_busy) {
+        printf("AFSK busy\r\n");
+        return false;
+    }
+    s_afsk_busy = true;
 
     /* Ensure AD9102 is in DDS sine continuous mode, not SRAM */
     write_reg(REG_PAT_STATUS, 0x0000);   /* stop pattern */
@@ -504,6 +513,8 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
     ram_update();
 
     build_afsk_frame(addr, data, len);
+
+    printf("AFSK start: addr=%02X bits=%u\r\n", addr, s_afsk_bit_count);
 
     /* Enable TIM2 clock and configure for AFSK bit rate */
     __HAL_RCC_TIM2_CLK_ENABLE();
@@ -544,5 +555,7 @@ void TIM2_IRQHandler(void)
         /* All bits sent — stop timer */
         TIM2->DIER = 0;
         TIM2->CR1 = 0;
+        s_afsk_busy = false;
+        printf("AFSK done\r\n");
     }
 }
