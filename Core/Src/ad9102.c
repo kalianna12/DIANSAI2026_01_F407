@@ -495,6 +495,14 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
         return false;
     }
 
+    /* Ensure AD9102 is in DDS sine continuous mode, not SRAM */
+    write_reg(REG_PAT_STATUS, 0x0000);   /* stop pattern */
+    write_reg(REG_DDS_CONFIG, 0x0000);
+    write_reg(REG_TW_RAM_CONFIG, 0x0000);
+    write_reg(REG_WAV_CONFIG, WAV_CONFIG_DDS_CONTINUOUS);
+    write_reg(REG_PAT_STATUS, 0x0001);   /* run */
+    ram_update();
+
     build_afsk_frame(addr, data, len);
 
     /* Enable TIM2 clock and configure for AFSK bit rate */
