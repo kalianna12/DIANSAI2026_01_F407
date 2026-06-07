@@ -1,7 +1,6 @@
 #include "stm_spi_link.h"
 #include "stm_adc.h"
 #include "ad9102.h"
-#include <stdio.h>
 
 #define STM_SPI_MAGIC_REQ  0xA5U
 #define STM_SPI_MAGIC_RESP 0x5AU
@@ -155,9 +154,6 @@ static uint16_t prepare_response(uint8_t *tx)
 static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t *out_rate_hz,
                              uint16_t *out_wave_points)
 {
-    printf("STM RX: magic=%02X cmd=%02X b2=%02X b3=%02X seq=%u\r\n",
-           rx[0], rx[1], rx[2], rx[3], rx[6]);
-
     if ((rx[0] != STM_SPI_MAGIC_REQ) || (rx[7] != checksum7(rx)))
     {
         return 0;
@@ -222,7 +218,6 @@ static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t 
             return 0;
         }
         s_afsk_expect_data = true;
-        printf("AFSK Phase1: addr=%02X len=%u\r\n", s_afsk_addr, s_afsk_len);
         return STM_SPI_CMD_AFSK_SEND;
     }
 
@@ -346,12 +341,6 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
         {
             s_afsk_buf[i] = s_rx_frame[STM_SPI_FRAME_LEN + i];
         }
-
-        printf("AFSK Phase2: data=%02X %02X %02X %02X\r\n",
-               s_afsk_buf[0],
-               s_afsk_len > 1 ? s_afsk_buf[1] : 0,
-               s_afsk_len > 2 ? s_afsk_buf[2] : 0,
-               s_afsk_len > 3 ? s_afsk_buf[3] : 0);
 
         s_sequence++;
         s_next_response_cmd = STM_SPI_CMD_AFSK_SEND;

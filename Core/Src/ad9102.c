@@ -1,5 +1,4 @@
 #include "ad9102.h"
-#include <stdio.h>
 
 /*
  * AD9102 software-SPI wiring, chosen to avoid AD9854 PA0-PA5/PC0-PC13,
@@ -500,7 +499,6 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
         return false;
     }
     if (s_afsk_busy) {
-        printf("AFSK busy\r\n");
         return false;
     }
     s_afsk_busy = true;
@@ -514,8 +512,6 @@ bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
     ram_update();
 
     build_afsk_frame(addr, data, len);
-
-    printf("AFSK start: addr=%02X bits=%u\r\n", addr, s_afsk_bit_count);
 
     /* Enable TIM2 clock and configure for AFSK bit rate */
     __HAL_RCC_TIM2_CLK_ENABLE();
@@ -557,6 +553,5 @@ void TIM2_IRQHandler(void)
         TIM2->DIER = 0;
         TIM2->CR1 = 0;
         s_afsk_busy = false;
-        printf("AFSK done\r\n");
     }
 }
