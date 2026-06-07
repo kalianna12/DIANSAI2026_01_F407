@@ -10,6 +10,8 @@
 #define STM_SPI_CMD_WAVE   0x04U
 #define STM_SPI_CMD_AD9102 0x05U
 #define STM_SPI_CMD_AD9102_AMP 0x06U
+#define STM_SPI_CMD_AFSK_SEND 0x07U
+#define STM_SPI_AFSK_MAX_LEN  63U
 #define STM_SPI_FRAME_LEN  8U
 #define STM_SPI_WAVE_MAX_POINTS 512U
 #define STM_SPI_WAVE_FRAME_LEN  (8U + (STM_SPI_WAVE_MAX_POINTS * 2U))
@@ -22,6 +24,12 @@ static uint16_t s_wave_points = 256U;
 static uint8_t s_tx_frame[STM_SPI_WAVE_FRAME_LEN];
 static uint8_t s_rx_frame[STM_SPI_WAVE_FRAME_LEN];
 static uint16_t s_wave_temp[STM_SPI_WAVE_MAX_POINTS];
+
+/* AFSK state */
+static bool s_afsk_expect_data = false;
+static uint8_t s_afsk_addr = 0;
+static uint8_t s_afsk_len = 0;
+static uint8_t s_afsk_buf[STM_SPI_AFSK_MAX_LEN];
 
 static uint8_t checksum7(const uint8_t *data)
 {
@@ -122,6 +130,13 @@ static uint16_t prepare_response(uint8_t *tx)
         tx[4] = s_last_ad9102_mode;
         tx[5] = 0;
     }
+    else if (s_next_response_cmd == STM_SPI_CMD_AFSK_SEND)
+    {
+        tx[2] = s_afsk_addr;
+        tx[3] = s_afsk_len;
+        tx[4] = 0;
+        tx[5] = 0;
+    }
     else
     {
         uint32_t f = s_current_freq_hz;
@@ -191,6 +206,18 @@ static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t 
     {
         *out_rate_hz = (uint16_t)rx[2] | ((uint16_t)rx[3] << 8);
         return STM_SPI_CMD_AD9102_AMP;
+    }
+
+    if (rx[1] == STM_SPI_CMD_AFSK_SEND)
+    {
+        s_afsk_addr = rx[2];
+        s_afsk_len = rx[3];
+        if (s_afsk_len > STM_SPI_AFSK_MAX_LEN)
+        {
+            s_afsk_len = STM_SPI_AFSK_MAX_LEN;
+        }
+        s_afsk_expect_data = true;
+        return STM_SPI_CMD_AFSK_SEND;
     }
 
     if (rx[1] != STM_SPI_CMD_FREQ)
@@ -292,6 +319,36 @@ void STM_SPI_Link_Init(uint32_t initial_freq_hz)
 
 bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
 {
+    /* AFSK data phase: ESP32 is sending extended frame with SMS data.
+     * We already received the header (addr, len) in previous poll.
+     * Now receive the full 8+len byte frame to get the data. */
+    if (s_afsk_expect_data)
+    {
+        s_afsk_expect_data = false;
+
+        uint16_t ext_len = (uint16_t)(STM_SPI_FRAME_LEN + s_afsk_len);
+        prepare_response(s_tx_frame); /* fills first 8 bytes of s_tx_frame */
+
+        if (!spi2_transfer_frame(s_tx_frame, s_rx_frame, ext_len))
+        {
+            s_next_response_cmd = STM_SPI_CMD_FREQ;
+            return false;
+        }
+
+        /* Copy data from offset 8 */
+        for (uint8_t i = 0; i < s_afsk_len; i++)
+        {
+            s_afsk_buf[i] = s_rx_frame[STM_SPI_FRAME_LEN + i];
+        }
+
+        s_sequence++;
+        s_next_response_cmd = STM_SPI_CMD_AFSK_SEND;
+
+        /* Start AFSK transmission on AD9102 */
+        AD9102_StartAfsk(s_afsk_addr, s_afsk_buf, s_afsk_len);
+        return false;
+    }
+
     uint16_t len = prepare_response(s_tx_frame);
 
     if (!spi2_transfer_frame(s_tx_frame, s_rx_frame, len))

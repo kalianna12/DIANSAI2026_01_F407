@@ -437,3 +437,104 @@ uint16_t AD9102_GetAmplitude(void)
 {
     return s_amplitude;
 }
+
+/* ---------- AFSK timer-based transmission (100bps) ---------- */
+
+#define AFSK_MARK_HZ   1200U
+#define AFSK_SPACE_HZ  2200U
+#define AFSK_BPS        100U
+#define AFSK_BIT_MS    (1000U / AFSK_BPS)  /* 10 ms */
+
+/* We use TIM2 for AFSK bit clock. ISR lives here. */
+static uint8_t  s_afsk_tx_buf[80];
+static uint16_t s_afsk_bit_count;
+static uint16_t s_afsk_bit_idx;
+
+static uint8_t crc8_afsk(const uint8_t *data, uint8_t len)
+{
+    uint8_t crc = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (crc & 0x80U) {
+                crc = (uint8_t)((crc << 1) ^ 0x07U);
+            } else {
+                crc = (uint8_t)(crc << 1);
+            }
+        }
+    }
+    return crc;
+}
+
+static void build_afsk_frame(uint8_t addr, const uint8_t *data, uint8_t len)
+{
+    /* Preamble: 0xAA, 0xAA  (16 bits alternating) */
+    s_afsk_tx_buf[0] = 0xAA;
+    s_afsk_tx_buf[1] = 0xAA;
+    /* Start flag: 0x7E */
+    s_afsk_tx_buf[2] = 0x7E;
+    /* Address */
+    s_afsk_tx_buf[3] = addr;
+    /* Length */
+    s_afsk_tx_buf[4] = len;
+    /* Data */
+    for (uint8_t i = 0; i < len; i++) {
+        s_afsk_tx_buf[5 + i] = data[i];
+    }
+    /* CRC-8 over addr + len + data */
+    uint8_t crc = crc8_afsk(&s_afsk_tx_buf[3], (uint8_t)(2 + len));
+    s_afsk_tx_buf[5 + len] = crc;
+
+    s_afsk_bit_count = (uint16_t)((6U + len) * 8U);
+    s_afsk_bit_idx = 0;
+}
+
+bool AD9102_StartAfsk(uint8_t addr, const uint8_t *data, uint8_t len)
+{
+    if (len == 0 || data == NULL) {
+        return false;
+    }
+
+    build_afsk_frame(addr, data, len);
+
+    /* Enable TIM2 clock and configure for AFSK bit rate */
+    __HAL_RCC_TIM2_CLK_ENABLE();
+
+    TIM2->CR1 = 0;
+    TIM2->PSC = 8399;   /* 84 MHz / 8400 = 10 kHz */
+    TIM2->ARR = 99;     /* 10 kHz / 100 = 100 Hz → 10 ms */
+    TIM2->CNT = 0;
+    TIM2->DIER = TIM_DIER_UIE;  /* Enable update interrupt */
+    TIM2->CR1 = TIM_CR1_CEN;    /* Start timer */
+
+    /* Set NVIC priority for TIM2 (lower number = higher priority) */
+    NVIC_SetPriority(TIM2_IRQn, 2);
+    NVIC_EnableIRQ(TIM2_IRQn);
+
+    return true;
+}
+
+/* TIM2 interrupt handler — called every 10 ms to output next AFSK bit */
+void TIM2_IRQHandler(void)
+{
+    if ((TIM2->SR & TIM_SR_UIF) == 0U) {
+        return;
+    }
+    TIM2->SR = ~TIM_SR_UIF;
+
+    if (s_afsk_bit_idx < s_afsk_bit_count) {
+        uint16_t byte_idx = s_afsk_bit_idx >> 3;
+        uint8_t  bit_pos  = (uint8_t)(s_afsk_bit_idx & 0x07U);
+        uint8_t  bit_val  = (s_afsk_tx_buf[byte_idx] >> bit_pos) & 0x01U;
+
+        /* Direct DDS frequency update (lightweight, no SRAM reconfig) */
+        write_dds_frequency(bit_val ? AFSK_MARK_HZ : AFSK_SPACE_HZ);
+        ram_update();
+
+        s_afsk_bit_idx++;
+    } else {
+        /* All bits sent — stop timer */
+        TIM2->DIER = 0;
+        TIM2->CR1 = 0;
+    }
+}
