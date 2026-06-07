@@ -1,6 +1,7 @@
 #include "stm_spi_link.h"
 #include "stm_adc.h"
 #include "ad9102.h"
+#include <stdio.h>
 
 #define STM_SPI_MAGIC_REQ  0xA5U
 #define STM_SPI_MAGIC_RESP 0x5AU

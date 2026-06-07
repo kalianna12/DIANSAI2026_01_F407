@@ -1,4 +1,5 @@
 #include "ad9102.h"
+#include <stdio.h>
 
 /*
  * AD9102 software-SPI wiring, chosen to avoid AD9854 PA0-PA5/PC0-PC13,
