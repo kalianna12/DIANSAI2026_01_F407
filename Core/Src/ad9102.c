@@ -50,6 +50,7 @@
 static ad9102_wave_t s_wave = AD9102_WAVE_SINE;
 static uint32_t s_freq_hz = AD9102_DEFAULT_FREQ_HZ;
 static uint16_t s_amplitude = AD9102_DEFAULT_AMP;
+static uint32_t s_actual_freq_hz = AD9102_DEFAULT_FREQ_HZ;
 
 static const uint16_t s_square[2] = {
     0x000, 0x0FFF,
@@ -190,10 +191,12 @@ static bool write_sram_waveform(const uint16_t *samples, uint16_t count)
     return write_reg(REG_PAT_STATUS, 0x0000);
 }
 
-static bool configure_sram_waveform(const uint16_t *samples, uint16_t count, uint32_t freq_hz)
+static bool configure_sram_waveform(const uint16_t *samples, uint16_t count, uint32_t freq_hz,
+                                    uint32_t *actual_freq_hz)
 {
     uint32_t pattern_cycles;
     uint32_t hold_cycles = 1U;
+    uint16_t hold_code;
     uint64_t denom;
 
     if (count < 2U)
@@ -210,14 +213,19 @@ static bool configure_sram_waveform(const uint16_t *samples, uint16_t count, uin
     {
         hold_cycles = 1U;
     }
-    if (hold_cycles > 255U)
+    if (hold_cycles > 16U)
     {
-        hold_cycles = 255U;
+        hold_cycles = 16U;
     }
+    hold_code = (hold_cycles == 16U) ? 0U : (uint16_t)hold_cycles;
     pattern_cycles = (uint32_t)count * hold_cycles;
     if (pattern_cycles > 0xFFFFU)
     {
         pattern_cycles = 0xFFFFU;
+    }
+    if (actual_freq_hz != NULL && pattern_cycles != 0U)
+    {
+        *actual_freq_hz = AD9102_DAC_CLK_HZ / pattern_cycles;
     }
 
     return write_sram_waveform(samples, count) &&
@@ -225,7 +233,7 @@ static bool configure_sram_waveform(const uint16_t *samples, uint16_t count, uin
            write_reg(REG_START_DLY, 0x0000) &&
            write_reg(REG_START_ADDR, ADDR_12BIT_FIELD(0)) &&
            write_reg(REG_STOP_ADDR, ADDR_12BIT_FIELD(count - 1U)) &&
-           write_reg(REG_PAT_TIMEBASE, (uint16_t)((hold_cycles << 8) | 0x0011U)) &&
+           write_reg(REG_PAT_TIMEBASE, (uint16_t)((hold_code << 8) | 0x0011U)) &&
            write_reg(REG_PAT_PERIOD, (uint16_t)pattern_cycles) &&
            write_reg(REG_PAT_TYPE, 0x0001) &&
            write_reg(REG_WAV_CONFIG, WAV_CONFIG_WAVE_RAM);
@@ -273,6 +281,7 @@ bool AD9102_Init(void)
 bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
 {
     bool ok = true;
+    uint32_t actual_freq_hz = freq_hz;
 
     if (amplitude > 0x07FFU)
     {
@@ -290,15 +299,16 @@ bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
         ok = ok && write_reg(REG_DDS_CONFIG, 0x0000);
         ok = ok && write_reg(REG_TW_RAM_CONFIG, 0x0000);
         ok = ok && write_reg(REG_WAV_CONFIG, WAV_CONFIG_DDS_CONTINUOUS);
+        actual_freq_hz = freq_hz;
         break;
     case AD9102_WAVE_SQUARE:
-        ok = ok && configure_sram_waveform(s_square, 2U, freq_hz);
+        ok = ok && configure_sram_waveform(s_square, 2U, freq_hz, &actual_freq_hz);
         break;
     case AD9102_WAVE_TRIANGLE:
-        ok = ok && configure_sram_waveform(s_triangle, 32U, freq_hz);
+        ok = ok && configure_sram_waveform(s_triangle, 32U, freq_hz, &actual_freq_hz);
         break;
     case AD9102_WAVE_ARBITRARY:
-        ok = ok && configure_sram_waveform(s_stair, 16U, freq_hz);
+        ok = ok && configure_sram_waveform(s_stair, 16U, freq_hz, &actual_freq_hz);
         break;
     default:
         return false;
@@ -315,7 +325,8 @@ bool AD9102_Configure(ad9102_wave_t wave, uint32_t freq_hz, uint16_t amplitude)
     if (ok)
     {
         s_wave = wave;
-        s_freq_hz = freq_hz;
+        s_freq_hz = actual_freq_hz;
+        s_actual_freq_hz = actual_freq_hz;
         s_amplitude = amplitude;
     }
     return ok;
@@ -356,7 +367,7 @@ ad9102_wave_t AD9102_GetMode(void)
 
 uint32_t AD9102_GetFreqHz(void)
 {
-    return s_freq_hz;
+    return s_actual_freq_hz;
 }
 
 uint16_t AD9102_GetAmplitude(void)
