@@ -1,5 +1,6 @@
 #include "stm_spi_link.h"
 #include "stm_adc.h"
+#include "ad9102.h"
 
 #define STM_SPI_MAGIC_REQ  0xA5U
 #define STM_SPI_MAGIC_RESP 0x5AU
@@ -7,6 +8,7 @@
 #define STM_SPI_CMD_ADC    0x02U
 #define STM_SPI_CMD_RATE   0x03U
 #define STM_SPI_CMD_WAVE   0x04U
+#define STM_SPI_CMD_AD9102 0x05U
 #define STM_SPI_FRAME_LEN  8U
 #define STM_SPI_WAVE_MAX_POINTS 512U
 #define STM_SPI_WAVE_FRAME_LEN  (8U + (STM_SPI_WAVE_MAX_POINTS * 2U))
@@ -14,6 +16,7 @@
 static uint32_t s_current_freq_hz = 35000000UL;
 static uint8_t s_sequence = 0;
 static uint8_t s_next_response_cmd = STM_SPI_CMD_FREQ;
+static uint8_t s_last_ad9102_mode = STM_SPI_AD9102_SINE;
 static uint16_t s_wave_points = 256U;
 static uint8_t s_tx_frame[STM_SPI_WAVE_FRAME_LEN];
 static uint8_t s_rx_frame[STM_SPI_WAVE_FRAME_LEN];
@@ -102,6 +105,14 @@ static uint16_t prepare_response(uint8_t *tx)
         tx[7] = checksum_bytes(tx, len, 7);
         return len;
     }
+    else if (s_next_response_cmd == STM_SPI_CMD_AD9102)
+    {
+        uint32_t f = AD9102_GetFreqHz();
+        tx[2] = s_last_ad9102_mode;
+        tx[3] = (uint8_t)f;
+        tx[4] = (uint8_t)(f >> 8);
+        tx[5] = (uint8_t)(f >> 16);
+    }
     else
     {
         uint32_t f = s_current_freq_hz;
@@ -151,6 +162,17 @@ static uint8_t parse_request(const uint8_t *rx, uint32_t *out_freq_hz, uint32_t 
         }
         *out_wave_points = points;
         return STM_SPI_CMD_WAVE;
+    }
+
+    if (rx[1] == STM_SPI_CMD_AD9102)
+    {
+        uint8_t mode = rx[2];
+        if (mode > STM_SPI_AD9102_ARBITRARY)
+        {
+            return 0;
+        }
+        *out_rate_hz = mode;
+        return STM_SPI_CMD_AD9102;
     }
 
     if (rx[1] != STM_SPI_CMD_FREQ)
@@ -288,6 +310,12 @@ bool STM_SPI_Link_Poll(uint32_t *out_freq_hz)
     if (cmd == STM_SPI_CMD_WAVE)
     {
         s_wave_points = wave_points;
+        return false;
+    }
+    if (cmd == STM_SPI_CMD_AD9102)
+    {
+        s_last_ad9102_mode = (uint8_t)rate_hz;
+        (void)AD9102_SetMode((ad9102_wave_t)s_last_ad9102_mode);
         return false;
     }
 
